@@ -39,6 +39,9 @@ class Main extends Mod {
 	/** The cards whose callback is taken, so each is taken once while its inventory lasts. */
 	var hooked:Array<Dynamic> = [];
 
+	/** The inventory last seen: a new town visit builds a new one, with new cards and callbacks. */
+	var inventorySeen:UIInventory;
+
 	/** What the cards are given instead of the game's open: kept, as Dynamic, for the field they sit in. */
 	var handler:Dynamic;
 
@@ -111,6 +114,13 @@ class Main extends Mod {
 
 	/** Takes the open callback of both chest cards of an inventory, once each. */
 	function hook(inventory:UIInventory):Void {
+		// A new town visit builds a new inventory: its cards and their callback are new too.
+		// Closing the inventory screen keeps the same one, and the cards already hold this handler.
+		if (inventory != inventorySeen) {
+			inventorySeen = inventory;
+			hooked = [];
+			passThrough = null;
+		}
 		take(inventory.mChestCard);
 		take(inventory.mConsumableChestCard);
 	}
@@ -292,10 +302,6 @@ class Main extends Mod {
 
 	function leaveTown():Void {
 		town = null;
-		hooked = [];
-		// The callback belongs to the inventory the game destroys on leaving: a new town visit
-		// builds another one, and calling the old one throws.
-		passThrough = null;
 		closePanel();
 	}
 
