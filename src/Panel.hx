@@ -321,9 +321,11 @@ class Panel {
 		Ui.set(info, Strings.t("chests") + " " + pAvailable + "        " + Strings.t("keys") + " " + pKeys + "        " + Strings.t("gold") + " "
 			+ Ui.number(pGold));
 		Ui.set(caption, Strings.f("max", Std.string(pMax)));
+		Ui.set(minLabel, pMax > 0 ? "1" : "");
 		Ui.set(maxLabel, Std.string(pMax));
 		slider.setMax(pMax);
 		slider.setValue(pValue);
+		pValue = slider.value;
 		goldBtn.setText(pPayGold ? Strings.t("pay_yes") : Strings.t("pay_no"));
 		goldBtn.setEnabled(pPrice > 0 && pKeys < pAvailable);
 		openBtn.setEnabled(pMax > 0);
@@ -334,7 +336,7 @@ class Panel {
 		var wanted = slider.value;
 		pValue = wanted;
 		if (wanted < 1) {
-			Ui.set(cost, Strings.t("no_currency"));
+			Ui.set(cost, emptyReason());
 			cost.textColor = Ui.RED;
 			openBtn.setText(Strings.t("open"));
 			return;
@@ -350,6 +352,15 @@ class Panel {
 		Ui.set(cost, text);
 		cost.textColor = spend > pGold ? Ui.RED : Ui.TEXT;
 		openBtn.setText(wanted == 1 ? Strings.t("open_one") : Strings.f("open_many", Std.string(wanted)));
+	}
+
+	/** Why there is nothing to open: no keys of this chest, or the gold that would buy them. */
+	function emptyReason():String {
+		if (pKeys > 0 || pPrice <= 0)
+			return Strings.t("no_currency");
+		if (!pPayGold)
+			return Strings.t("no_keys_gold_off");
+		return Strings.t("no_keys_gold_short");
 	}
 
 	function renderBusy():Void {

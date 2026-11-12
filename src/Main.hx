@@ -153,7 +153,7 @@ class Main extends Mod {
 		var available = ChestRun.count(inventoryInfo, kind);
 		var max = maxFor(facade, inventoryInfo, kind, available);
 		Log.write("available=" + available + " max=" + max + " keys=" + keyCount(inventoryInfo, kind));
-		if (available <= 0 || max <= 0) {
+		if (available <= 0) {
 			pass(chest);
 			return;
 		}
