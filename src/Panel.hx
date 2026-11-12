@@ -1,4 +1,4 @@
-﻿package mods.multi_chest_opener;
+package mods.multi_chest_opener;
 
 import openfl.display.Shape;
 import openfl.display.Sprite;

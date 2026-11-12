@@ -1,4 +1,4 @@
-﻿package mods.multi_chest_opener;
+package mods.multi_chest_opener;
 
 /** The panel's words in English and Spanish; `lang` is "en" or "es". */
 class Strings {

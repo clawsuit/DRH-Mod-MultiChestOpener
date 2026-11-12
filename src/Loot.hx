@@ -1,4 +1,4 @@
-﻿package mods.multi_chest_opener;
+package mods.multi_chest_opener;
 
 import account.ItemInfo;
 import facade.DBFacade;
