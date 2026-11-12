@@ -2,7 +2,7 @@
   "id": "multi_chest_opener",
   "name": "Multi Chest Opener",
   "description": "Opens several chests at once with a slider for your keys and gold, and shows the loot with each weapon's icon.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": "iClawSuit",
   "api": "1.2",
   "entry": "Main",

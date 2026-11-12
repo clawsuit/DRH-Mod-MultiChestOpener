@@ -1,5 +1,6 @@
-﻿package mods.multi_chest_opener;
+package mods.multi_chest_opener;
 
+import account.AvatarInfo;
 import account.ChestInfo;
 import account.DBInventoryInfo;
 import account.KeyInfo;
@@ -159,8 +160,15 @@ class Main extends Mod {
 	/** Hands a click back to the game's own open, such as its buy-keys popup. */
 	function pass(chest:ChestInfo):Void {
 		Log.write("pass=" + (passThrough != null));
-		if (passThrough != null && chest != null)
+		if (passThrough == null || chest == null)
+			return;
+		try {
 			passThrough(chest);
+		} catch (error:Dynamic) {
+			// The inventory that owned that callback is gone: a new town visit builds another.
+			Log.write("pass failed: " + Std.string(error));
+			passThrough = null;
+		}
 	}
 
 	/** How many the keys owned and the gold to buy more allow, up to the chests held. */
@@ -215,10 +223,32 @@ class Main extends Mod {
 		shownOpened = 0;
 		panel.running(amount);
 		keepCardOnThisChest();
-		Log.write("run start amount=" + amount);
+		var avatar = heroSelected(facade);
+		var heroId:UInt = avatar == null ? 0 : avatar.id;
+		var heroSkin:UInt = avatar == null ? 0 : avatar.skinId;
+		Log.write("run start amount=" + amount + " hero=" + heroId + " skin=" + heroSkin);
 		var opening = new ChestRun(facade, gmId, settings.payGold, finishRun);
 		run = opening;
-		opening.start(amount);
+		opening.start(amount, heroId, heroSkin);
+	}
+
+	/**
+	 * The hero the game opens them for: the one picked in the inventory, as `UIInventory.openChest`
+	 * does, and the account's active hero only when that picker is not there.
+	 */
+	function heroSelected(facade:DBFacade):AvatarInfo {
+		try {
+			var inventory:UIInventory = town == null ? null : town.mUIInventory;
+			if (inventory != null && inventory.mHeroWithEquipPicker != null) {
+				var heroType:UInt = inventory.mHeroWithEquipPicker.currentlySelectedHero.Id;
+				var avatar:AvatarInfo = facade.dbAccountInfo.inventoryInfo.getAvatarInfoForHeroType(heroType);
+				if (avatar != null)
+					return avatar;
+			}
+		} catch (error:Dynamic) {
+			Log.write("hero lookup failed: " + Std.string(error));
+		}
+		return facade.dbAccountInfo.activeAvatarInfo;
 	}
 
 	/**
@@ -263,6 +293,9 @@ class Main extends Mod {
 	function leaveTown():Void {
 		town = null;
 		hooked = [];
+		// The callback belongs to the inventory the game destroys on leaving: a new town visit
+		// builds another one, and calling the old one throws.
+		passThrough = null;
 		closePanel();
 	}
 

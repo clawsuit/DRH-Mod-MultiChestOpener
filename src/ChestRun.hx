@@ -1,4 +1,4 @@
-﻿package mods.multi_chest_opener;
+package mods.multi_chest_opener;
 
 import account.DBInventoryInfo;
 import account.KeyInfo;
@@ -42,6 +42,14 @@ class ChestRun {
 
 	/** How many keys were bought for this run, so a key that never arrives cannot be bought twice. */
 	var bought:Int = 0;
+
+	/** The hero the game opens them for: the one picked in the inventory. */
+	var heroId:UInt = 0;
+
+	var heroSkin:UInt = 0;
+
+	/** Rows the game already had a request in flight for, so the run did not add another. */
+	var skipped:Int = 0;
 
 	var finished:Bool = false;
 
@@ -88,7 +96,9 @@ class ChestRun {
 		return out;
 	}
 
-	public function start(amount:Int):Void {
+	public function start(amount:Int, heroId:UInt, heroSkin:UInt):Void {
+		this.heroId = heroId;
+		this.heroSkin = heroSkin;
 		rows = rowsOf(facade.dbAccountInfo.inventoryInfo, gmId);
 		total = amount < rows.length ? amount : rows.length;
 		if (total < 0)
@@ -138,6 +148,8 @@ class ChestRun {
 			return "run_refused";
 		if (failed == "TIMEOUT")
 			return "run_timeout";
+		if (failed == "BUSY")
+			return "run_busy";
 		return "run_stopped";
 	}
 
@@ -164,24 +176,43 @@ class ChestRun {
 	function openNext():Void {
 		if (finished)
 			return;
-		if (opened >= total || stoppedByPlayer || failed != null || rows.length == 0) {
-			finish();
+		var info = facade.dbAccountInfo.inventoryInfo;
+		while (rows.length > 0) {
+			if (opened >= total || stoppedByPlayer || failed != null) {
+				finish();
+				return;
+			}
+			var row:UInt = rows.shift();
+			// The game's own open returns without calling back while that row has a request in
+			// flight, which would leave the run waiting for its timeout: take the next row.
+			if (isPending(info, row)) {
+				skipped++;
+				Log.write("skip row " + row + ": a request is pending");
+				continue;
+			}
+			busy = true;
+			waitingSince = Timer.stamp();
+			try {
+				var done:Dynamic = onOpened;
+				var failedCallback:Dynamic = onOpenFailed;
+				info.openChest(row, heroId, heroSkin, done, failedCallback);
+			} catch (error:Dynamic) {
+				busy = false;
+				failed = "REJECTED";
+				finish();
+			}
 			return;
 		}
-		var row:UInt = rows.shift();
-		var avatar = facade.dbAccountInfo.activeAvatarInfo;
-		var heroId:UInt = avatar == null ? 0 : avatar.id;
-		var heroSkin:UInt = avatar == null ? 0 : avatar.skinId;
-		busy = true;
-		waitingSince = Timer.stamp();
+		if (opened == 0 && skipped > 0)
+			failed = "BUSY";
+		finish();
+	}
+
+	static function isPending(info:DBInventoryInfo, row:UInt):Bool {
 		try {
-			var done:Dynamic = onOpened;
-			var failedCallback:Dynamic = onOpenFailed;
-			facade.dbAccountInfo.inventoryInfo.openChest(row, heroId, heroSkin, done, failedCallback);
+			return info.isChestRequestPending(row);
 		} catch (error:Dynamic) {
-			busy = false;
-			failed = "REJECTED";
-			finish();
+			return false;
 		}
 	}
 

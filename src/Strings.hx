@@ -1,4 +1,4 @@
-package mods.multi_chest_opener;
+﻿package mods.multi_chest_opener;
 
 /** The panel's words in English and Spanish; `lang` is "en" or "es". */
 class Strings {
@@ -44,7 +44,8 @@ class Strings {
 		"run_no_keys" => "NO KEYS LEFT",
 		"run_buy_failed" => "COULD NOT BUY A KEY",
 		"run_refused" => "THE SERVER REFUSED A CHEST",
-		"run_timeout" => "THE SERVER DID NOT ANSWER"
+		"run_timeout" => "THE SERVER DID NOT ANSWER",
+		"run_busy" => "THE STORAGE WAS BUSY, TRY AGAIN"
 	];
 
 	static var es:Map<String, String> = [
@@ -87,7 +88,8 @@ class Strings {
 		"run_no_keys" => "SIN LLAVES",
 		"run_buy_failed" => "NO SE PUDO COMPRAR LA LLAVE",
 		"run_refused" => "EL SERVIDOR RECHAZO UN COFRE",
-		"run_timeout" => "EL SERVIDOR NO RESPONDIO"
+		"run_timeout" => "EL SERVIDOR NO RESPONDIO",
+		"run_busy" => "EL INVENTARIO ESTABA OCUPADO, INTENTA OTRA VEZ"
 	];
 
 	public static function t(key:String):String {
@@ -109,3 +111,4 @@ class Strings {
 		return text;
 	}
 }
+
