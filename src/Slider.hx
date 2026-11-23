@@ -105,6 +105,16 @@ class Slider {
 		}
 	}
 
+	/** The panel is closing while the knob may still be held: stop listening on the stage. */
+	public function dispose():Void {
+		if (dragging && root != null && root.stage != null) {
+			root.stage.removeEventListener(MouseEvent.MOUSE_MOVE, move);
+			root.stage.removeEventListener(MouseEvent.MOUSE_UP, end);
+		}
+		dragging = false;
+		onChange = null;
+	}
+
 	function pick(stageX:Float, stageY:Float):Void {
 		var stage = root.stage;
 		if (stage == null)

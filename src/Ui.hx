@@ -25,6 +25,15 @@ class Ui {
 
 	public static inline final RED = 0xE8704A;
 
+	/** One filter for every label: a new GlowFilter per field costs a render pass each. */
+	static var glow:GlowFilter = null;
+
+	static function inkGlow():GlowFilter {
+		if (glow == null)
+			glow = new GlowFilter(INK, 1, 4, 4, 4);
+		return glow;
+	}
+
 	/** A label in a bold font, outlined as the game's texts are. */
 	public static function text(size:Int, color:Int, width:Float, align:TextFormatAlign, wrap:Bool = false):TextField {
 		var field = new TextField();
@@ -35,7 +44,7 @@ class Ui {
 		field.multiline = wrap;
 		field.wordWrap = wrap;
 		field.defaultTextFormat = new TextFormat("_sans", size, color, true, null, null, null, null, align);
-		field.filters = [new GlowFilter(INK, 1, 4, 4, 4)];
+		field.filters = [inkGlow()];
 		return field;
 	}
 

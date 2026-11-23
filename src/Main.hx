@@ -10,6 +10,7 @@ import facade.DBFacade;
 import facade.GameMasterLocale;
 import gameMasterDictionary.GMOffer;
 import gameMasterDictionary.GMRarity;
+import haxe.ds.ObjectMap;
 import mods.api.Context;
 import mods.api.Mod;
 import openfl.events.Event;
@@ -18,11 +19,11 @@ import uI.inventory.UIInventory;
 import uI.inventory.chests.ChestInfoCard;
 
 /**
- * Many chests at once from the town's inventory: UNLOCK opens a panel with a slider, from 1 to what
- * the keys owned and the gold to buy more allow. The run opens them one after the other, keeping the
- * loot for the panel's grid of icons.
+ * Many chests at once from the town's inventory: UNLOCK opens a panel to open a number of them, and
+ * ABANDON opens the same panel to discard a number of them. Both runs go one request at a time.
  *
- * It takes the chest cards' open callback, as `full_inventory` does.
+ * It wraps the chest cards' open and abandon callbacks (never replaces them outright), so the game's
+ * own window is always one button away and any other mod that wrapped a callback first keeps its turn.
  */
 @:privateAccess
 class Main extends Mod {
@@ -36,21 +37,27 @@ class Main extends Mod {
 
 	var town:InventoryTownSubState;
 
-	/** The cards whose callback is taken, so each is taken once while its inventory lasts. */
+	/** The cards whose callbacks are wrapped, so each is wrapped once while its inventory lasts. */
 	var hooked:Array<Dynamic> = [];
+
+	/** The wrappers set on each card. */
+	var wrappers:ObjectMap<Dynamic, Dynamic> = new ObjectMap();
+
+	var wrappersAbandon:ObjectMap<Dynamic, Dynamic> = new ObjectMap();
+
+	/** What each card had before, to hand a click back to the game. */
+	var previous:ObjectMap<Dynamic, Dynamic> = new ObjectMap();
+
+	var previousAbandon:ObjectMap<Dynamic, Dynamic> = new ObjectMap();
 
 	/** The inventory last seen: a new town visit builds a new one, with new cards and callbacks. */
 	var inventorySeen:UIInventory;
 
-	/** What the cards are given instead of the game's open: kept, as Dynamic, for the field they sit in. */
-	var handler:Dynamic;
-
-	/** The callback the cards had before, to hand a click back to the game. */
-	var passThrough:Dynamic;
-
 	var panel:Panel;
 
 	var run:ChestRun;
+
+	var dropRun:AbandonRun;
 
 	/** The kind of chest the panel is about. */
 	var gmId:Int = 0;
@@ -58,13 +65,27 @@ class Main extends Mod {
 	/** The number of opened chests the panel shows last, -1 before a run. */
 	var shownOpened:Int = -1;
 
+	/** The number of abandoned chests the panel shows last, -1 before a run. */
+	var shownDropped:Int = -1;
+
+	var panelChest:ChestInfo;
+
+	var panelPrevious:Dynamic;
+
+	var panelAbandon:Bool = false;
+
+	/** The mod was disposed or hit a structural error: stop touching the game. */
+	var closed:Bool = false;
+
+	var failed:Bool = false;
+
 	override public function init(context:Context):Void {
 		ctx = context;
 		try {
 			Log.start(ctx.data);
 		} catch (error:Dynamic) {}
 		settings = new Settings(ctx.data, ctx.log);
-		handler = onUnlock;
+		Strings.lang = settings.language;
 		ctx.core.onStateEnter(function(_:StateMachine, state:State) {
 			if (Std.isOfType(state, InventoryTownSubState))
 				town = cast state;
@@ -78,7 +99,7 @@ class Main extends Mod {
 		Log.write("init");
 	}
 
-		override public function ready(context:Context):Void {
+	override public function ready(context:Context):Void {
 		var facade = ctx.core.facade;
 		if (facade != null) {
 			try {
@@ -91,93 +112,181 @@ class Main extends Mod {
 	}
 
 	override public function dispose():Void {
+		closed = true;
+		if (ctx != null && ctx.overlay != null)
+			ctx.overlay.removeEventListener(Event.EXIT_FRAME, tick);
 		closePanel();
+		restoreHooks();
 		Icon.destroy();
+		Log.flush();
 	}
 
-	/** A frame after the game's own work: take the cards' callback and move the run along. */
+	/** Puts the cards' original callbacks back where nothing else wrapped the mod's wrapper. */
+	function restoreHooks():Void {
+		for (card in hooked) {
+			var open = wrappers.get(card);
+			if (open != null && Reflect.compareMethods(card.mOpenChestCallback, open))
+				card.mOpenChestCallback = previous.get(card);
+			var abandon = wrappersAbandon.get(card);
+			if (abandon != null && Reflect.compareMethods(card.mAbandonChestCallback, abandon))
+				card.mAbandonChestCallback = previousAbandon.get(card);
+		}
+		hooked = [];
+		wrappers = new ObjectMap();
+		wrappersAbandon = new ObjectMap();
+		previous = new ObjectMap();
+		previousAbandon = new ObjectMap();
+	}
+
+	/** A frame after the game's own work: wrap the cards' callbacks and move the runs along. */
 	function tick(_:Event):Void {
-		if (town == null)
+		if (closed || failed || town == null)
 			return;
-		var inventory:UIInventory = town.mUIInventory;
-		if (inventory == null)
-			return;
-		hook(inventory);
-		if (run != null) {
-			run.update();
-			if (panel != null && run.opened != shownOpened) {
-				shownOpened = run.opened;
-				panel.progress(run.opened, run.total, run.keysLeft(), run.goldLeft());
+		try {
+			var inventory:UIInventory = town.mUIInventory;
+			if (inventory == null)
+				return;
+			hook(inventory);
+			if (run != null) {
+				run.update();
+				if (run != null && panel != null && run.opened != shownOpened) {
+					shownOpened = run.opened;
+					panel.progress(run.opened, run.total, run.keysLeft(), run.goldLeft());
+				}
 			}
+			if (dropRun != null) {
+				dropRun.update();
+				if (dropRun != null && panel != null && dropRun.done != shownDropped) {
+					shownDropped = dropRun.done;
+					panel.progressAbandon(dropRun.done, dropRun.total);
+				}
+			}
+		} catch (error:Dynamic) {
+			fail("tick: " + Std.string(error));
 		}
 	}
 
-	/** Takes the open callback of both chest cards of an inventory, once each. */
+	/** Wraps the open and abandon callbacks of both chest cards of an inventory, once each. */
 	function hook(inventory:UIInventory):Void {
-		// A new town visit builds a new inventory: its cards and their callback are new too.
-		// Closing the inventory screen keeps the same one, and the cards already hold this handler.
 		if (inventory != inventorySeen) {
 			inventorySeen = inventory;
 			hooked = [];
-			passThrough = null;
+			wrappers = new ObjectMap();
+			wrappersAbandon = new ObjectMap();
+			previous = new ObjectMap();
+			previousAbandon = new ObjectMap();
 		}
 		take(inventory.mChestCard);
 		take(inventory.mConsumableChestCard);
 	}
 
 	function take(card:ChestInfoCard):Void {
-		if (card == null || hooked.indexOf(card) >= 0)
+		if (card == null)
 			return;
-		if (passThrough == null)
-			passThrough = card.mOpenChestCallback;
-		card.mOpenChestCallback = handler;
-		hooked.push(card);
-		Log.write("hook: card taken");
+		var wrapped = false;
+		if (wrappers.get(card) == null) {
+			var originalOpen:Dynamic = card.mOpenChestCallback;
+			if (originalOpen != null) {
+				previous.set(card, originalOpen);
+				var openWrapper:Dynamic = function(info:Dynamic) onUnlock(info, card, originalOpen);
+				wrappers.set(card, openWrapper);
+				card.mOpenChestCallback = openWrapper;
+				wrapped = true;
+			}
+		}
+		if (wrappersAbandon.get(card) == null) {
+			var originalAbandon:Dynamic = card.mAbandonChestCallback;
+			if (originalAbandon != null) {
+				previousAbandon.set(card, originalAbandon);
+				var abandonWrapper:Dynamic = function(info:Dynamic) onAbandon(info, card, originalAbandon);
+				wrappersAbandon.set(card, abandonWrapper);
+				card.mAbandonChestCallback = abandonWrapper;
+				wrapped = true;
+			}
+		}
+		if (wrapped && hooked.indexOf(card) < 0)
+			hooked.push(card);
+		if (wrapped)
+			Log.write("hook");
 	}
 
 	/** UNLOCK: the panel, or the game's own popup when nothing can be opened. */
-	function onUnlock(info:Dynamic):Void {
-		var chest:ChestInfo = info;
+	function onUnlock(info:Dynamic, card:ChestInfoCard, original:Dynamic):Void {
+		if (closed || failed) {
+			pass(original, info);
+			return;
+		}
+		var chest:ChestInfo = cast info;
 		var facade = ctx.core.facade;
-		Log.write("click " + (chest == null ? "null" : Std.string(chest.gmId)));
 		if (chest == null || facade == null) {
-			pass(chest);
+			pass(original, chest);
 			return;
 		}
 		var inventoryInfo = facade.dbAccountInfo.inventoryInfo;
 		if (inventoryInfo == null || chest.isFromDungeonSummary()) {
-			pass(chest);
+			pass(original, chest);
 			return;
 		}
 		var kind = Std.int(chest.gmId);
 		var available = ChestRun.count(inventoryInfo, kind);
 		var max = maxFor(facade, inventoryInfo, kind, available);
-		Log.write("available=" + available + " max=" + max + " keys=" + keyCount(inventoryInfo, kind));
-		if (available <= 0) {
-			pass(chest);
+		Log.write("click kind=" + kind + " available=" + available + " max=" + max + " keys=" + keyCount(inventoryInfo, kind));
+		if (available <= 0 || max <= 0) {
+			// Nothing the mod can do: let the game show its own window, gem purchases included.
+			pass(original, chest);
 			return;
 		}
 		try {
-			openPanel(facade, chest, inventoryInfo, available, max);
+			openPanel(facade, chest, inventoryInfo, available, max, original, false);
 			Log.write("panel=" + (panel != null && panel.isShown()));
 		} catch (error:Dynamic) {
 			Log.write("PANEL FAILED: " + Std.string(error));
 			closePanel();
-			pass(chest);
+			pass(original, chest);
 		}
 	}
 
-	/** Hands a click back to the game's own open, such as its buy-keys popup. */
-	function pass(chest:ChestInfo):Void {
-		Log.write("pass=" + (passThrough != null));
-		if (passThrough == null || chest == null)
+	/** ABANDON: the same panel, in discard mode. */
+	function onAbandon(info:Dynamic, card:ChestInfoCard, original:Dynamic):Void {
+		if (closed || failed) {
+			pass(original, info);
+			return;
+		}
+		var chest:ChestInfo = cast info;
+		var facade = ctx.core.facade;
+		if (chest == null || facade == null) {
+			pass(original, chest);
+			return;
+		}
+		var inventoryInfo = facade.dbAccountInfo.inventoryInfo;
+		if (inventoryInfo == null || chest.isFromDungeonSummary()) {
+			pass(original, chest);
+			return;
+		}
+		var kind = Std.int(chest.gmId);
+		var available = ChestRun.count(inventoryInfo, kind);
+		Log.write("abandon click kind=" + kind + " available=" + available);
+		if (available <= 0) {
+			pass(original, chest);
+			return;
+		}
+		try {
+			openPanel(facade, chest, inventoryInfo, available, available, original, true);
+		} catch (error:Dynamic) {
+			Log.write("ABANDON PANEL FAILED: " + Std.string(error));
+			closePanel();
+			pass(original, chest);
+		}
+	}
+
+	/** Hands a click back to the game's own open or abandon. */
+	function pass(original:Dynamic, info:Dynamic):Void {
+		if (original == null || info == null)
 			return;
 		try {
-			passThrough(chest);
+			original(info);
 		} catch (error:Dynamic) {
-			// The inventory that owned that callback is gone: a new town visit builds another.
 			Log.write("pass failed: " + Std.string(error));
-			passThrough = null;
 		}
 	}
 
@@ -193,53 +302,101 @@ class Main extends Mod {
 		return max > available ? available : max;
 	}
 
-	function openPanel(facade:DBFacade, chest:ChestInfo, inventoryInfo:DBInventoryInfo, available:Int, max:Int):Void {
+	function openPanel(facade:DBFacade, chest:ChestInfo, inventoryInfo:DBInventoryInfo, available:Int, max:Int, original:Dynamic,
+			abandon:Bool):Void {
 		closePanel();
 		gmId = Std.int(chest.gmId);
-		panel = new Panel(ctx.overlay, ctx.viewWidth, ctx.viewHeight, settings);
+		panelChest = chest;
+		panelPrevious = original;
+		panelAbandon = abandon;
+		panel = new Panel(ctx.overlay, ctx.viewWidth, ctx.viewHeight);
 		panel.onOpen = startRun;
+		panel.onAbandon = startAbandon;
 		panel.onGold = setGold;
 		panel.onClose = closePanel;
 		panel.onStop = stopRun;
+		panel.onGame = useGameWindow;
+		panel.onLanguage = toggleLanguage;
 		shownOpened = -1;
-		var wanted = settings.amount;
+		shownDropped = -1;
+		var wanted = 1;
 		if (wanted > max)
 			wanted = max;
 		if (wanted < 1)
 			wanted = 1;
-		panel.ask(chestName(chest), chestColor(facade, chest), available, keyCount(inventoryInfo, gmId), facade.dbAccountInfo.basicCurrency,
-			priceFor(inventoryInfo, gmId), max, wanted, settings.payGold);
+		panel.ask(chestName(chest), chestColor(facade, chest), available, abandon ? 0 : keyCount(inventoryInfo, gmId),
+			abandon ? 0 : facade.dbAccountInfo.basicCurrency, abandon ? 0 : priceFor(inventoryInfo, gmId), abandon ? available : max, wanted,
+			settings.payGold, abandon);
 	}
 
 	/** The gold toggle of the panel: the range it allows changes with it. */
 	function setGold(value:Bool):Void {
+		if (panel == null || panelAbandon)
+			return;
 		settings.payGold = value;
 		settings.save();
+		refreshNumbers();
+	}
+
+	function refreshNumbers():Void {
 		var facade = ctx.core.facade;
-		if (panel == null || facade == null)
+		if (panel == null || panelAbandon || facade == null)
 			return;
 		var inventoryInfo = facade.dbAccountInfo.inventoryInfo;
+		if (inventoryInfo == null)
+			return;
 		var available = ChestRun.count(inventoryInfo, gmId);
 		var max = maxFor(facade, inventoryInfo, gmId, available);
-		panel.numbers(available, keyCount(inventoryInfo, gmId), facade.dbAccountInfo.basicCurrency, priceFor(inventoryInfo, gmId), max, value);
+		panel.numbers(available, keyCount(inventoryInfo, gmId), facade.dbAccountInfo.basicCurrency, priceFor(inventoryInfo, gmId), max,
+			settings.payGold);
+	}
+
+	function toggleLanguage():Void {
+		settings.language = Strings.lang == "es" ? "en" : "es";
+		settings.save();
+		Strings.lang = settings.language;
+		if (panel != null)
+			panel.rebuild();
+	}
+
+	/** The game's own chest window, for buying keys with gems or the normal one-by-one flow. */
+	function useGameWindow():Void {
+		var chest = panelChest;
+		var original = panelPrevious;
+		Log.write("game window abandon=" + panelAbandon);
+		closePanel();
+		pass(original, chest);
 	}
 
 	function startRun(amount:Int):Void {
 		var facade = ctx.core.facade;
 		if (panel == null || facade == null)
 			return;
-		settings.amount = amount;
-		settings.save();
 		shownOpened = 0;
-		panel.running(amount);
+		panel.running(amount, false);
 		keepCardOnThisChest();
 		var avatar = heroSelected(facade);
 		var heroId:UInt = avatar == null ? 0 : avatar.id;
 		var heroSkin:UInt = avatar == null ? 0 : avatar.skinId;
-		Log.write("run start amount=" + amount + " hero=" + heroId + " skin=" + heroSkin);
-		var opening = new ChestRun(facade, gmId, settings.payGold, finishRun);
+		var fullInventory = ctx.isActive("full_inventory");
+		Log.write("run start amount=" + amount + " hero=" + heroId + " skin=" + heroSkin + " fullInventory=" + fullInventory
+			+ " payGold=" + settings.payGold);
+		var opening = new ChestRun(facade, gmId, settings.payGold, fullInventory, finishRun);
 		run = opening;
 		opening.start(amount, heroId, heroSkin);
+	}
+
+	function startAbandon(amount:Int):Void {
+		var facade = ctx.core.facade;
+		if (panel == null || facade == null)
+			return;
+		shownDropped = 0;
+		panel.running(amount, true);
+		keepCardOnThisChest();
+		Log.write("abandon start amount=" + amount);
+		var dropping = new AbandonRun(facade, gmId, finishAbandon);
+		dropRun = dropping;
+		dropping.start(amount);
 	}
 
 	/**
@@ -282,11 +439,24 @@ class Main extends Mod {
 		run = null;
 		Log.write("run end opened=" + done.opened + " failed=" + done.failed);
 		panel.result(done.opened, done.loot, done.message(), done.failed == null && !done.stoppedByPlayer);
+		Log.flush();
+	}
+
+	function finishAbandon():Void {
+		if (dropRun == null || panel == null)
+			return;
+		var done = dropRun;
+		dropRun = null;
+		Log.write("abandon end done=" + done.done + " failed=" + done.failed);
+		panel.abandoned(done.done, done.message(), done.failed == null && !done.stoppedByPlayer);
+		Log.flush();
 	}
 
 	function stopRun():Void {
 		if (run != null)
 			run.stop();
+		if (dropRun != null)
+			dropRun.stop();
 	}
 
 	function closePanel():Void {
@@ -298,14 +468,27 @@ class Main extends Mod {
 			run.stop();
 			run = null;
 		}
+		if (dropRun != null) {
+			dropRun.stop();
+			dropRun = null;
+		}
+		panelChest = null;
+		panelPrevious = null;
+		panelAbandon = false;
 	}
 
 	function leaveTown():Void {
 		town = null;
 		closePanel();
+		inventorySeen = null;
+		hooked = [];
+		wrappers = new ObjectMap();
+		wrappersAbandon = new ObjectMap();
+		previous = new ObjectMap();
+		previousAbandon = new ObjectMap();
 	}
 
-	/** The panel keeps every key while it shows: Escape closes it, Enter opens the amount picked. */
+	/** The panel keeps every key while it shows: Escape stops or closes, Enter confirms. */
 	function onKey(key:UInt):Bool {
 		if (panel == null || !panel.isShown())
 			return false;
@@ -314,11 +497,22 @@ class Main extends Mod {
 			return true;
 		}
 		if (key == ESCAPE) {
-			if (run == null)
+			if (run != null || dropRun != null)
+				stopRun();
+			else
 				closePanel();
 			return true;
 		}
 		return true;
+	}
+
+	function fail(reason:String):Void {
+		if (failed)
+			return;
+		failed = true;
+		Log.write("FAILED: " + reason);
+		Log.flush();
+		closePanel();
 	}
 
 	function chestName(chest:ChestInfo):String {
@@ -365,5 +559,3 @@ class Main extends Mod {
 		return key.gmKeyOffer.Price;
 	}
 }
-
-

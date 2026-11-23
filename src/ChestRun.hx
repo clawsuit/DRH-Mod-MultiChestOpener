@@ -10,10 +10,14 @@ import haxe.Timer;
 /**
  * Opens chests of one kind, one request at a time, so the account the server answers is read whole
  * between two. A key comes from the keys owned, or from gold when none is left and `payGold` is on.
+ * A chest the server is still busy with is retried once; a full storage stops the run before opening.
  */
 class ChestRun {
 	/** Seconds a request may take before the run gives up. */
 	static inline final TIMEOUT = 20.0;
+
+	/** Seconds to wait before retrying the chests the server was still busy with. */
+	static inline final RETRY_DELAY = 1.2;
 
 	/** How many are to be opened, and how many were. */
 	public var total:Int = 0;
@@ -35,8 +39,17 @@ class ChestRun {
 
 	var payGold:Bool;
 
+	var fullInventory:Bool;
+
 	/** The chest rows left to open, by database id. */
 	var rows:Array<UInt> = [];
+
+	/** Rows the game already had a request in flight for, kept for one retry. */
+	var pendingRows:Array<UInt> = [];
+
+	var retried:Bool = false;
+
+	var retryAt:Float = -1;
 
 	var waitingSince:Float = 0;
 
@@ -48,17 +61,15 @@ class ChestRun {
 
 	var heroSkin:UInt = 0;
 
-	/** Rows the game already had a request in flight for, so the run did not add another. */
-	var skipped:Int = 0;
-
 	var finished:Bool = false;
 
 	var onDone:Void->Void;
 
-	public function new(facade:DBFacade, gmId:Int, payGold:Bool, onDone:Void->Void) {
+	public function new(facade:DBFacade, gmId:Int, payGold:Bool, fullInventory:Bool, onDone:Void->Void) {
 		this.facade = facade;
 		this.gmId = gmId;
 		this.payGold = payGold;
+		this.fullInventory = fullInventory;
 		this.onDone = onDone;
 	}
 
@@ -103,7 +114,7 @@ class ChestRun {
 		total = amount < rows.length ? amount : rows.length;
 		if (total < 0)
 			total = 0;
-		next();
+		step();
 	}
 
 	public function stop():Void {
@@ -112,13 +123,24 @@ class ChestRun {
 		stoppedByPlayer = true;
 		if (busy)
 			return;
+		retryAt = 0;
 		finish();
 	}
 
 	public function update():Void {
-		if (!busy || finished)
+		if (finished)
 			return;
-		if (Timer.stamp() - waitingSince > TIMEOUT) {
+		var now = Timer.stamp();
+		if (retryAt > 0) {
+			if (!busy && now >= retryAt) {
+				retryAt = 0;
+				next();
+			}
+			return;
+		}
+		if (!busy)
+			return;
+		if (now - waitingSince > TIMEOUT) {
 			busy = false;
 			failed = "TIMEOUT";
 			finish();
@@ -150,14 +172,23 @@ class ChestRun {
 			return "run_timeout";
 		if (failed == "BUSY")
 			return "run_busy";
+		if (failed == "STORAGE")
+			return "run_storage_full";
+		if (failed == "PARTIAL")
+			return "run_partial";
 		return "run_stopped";
 	}
 
 	function step():Void {
 		if (finished)
 			return;
-		if (opened >= total || stoppedByPlayer || failed != null || rows.length == 0) {
+		if (stoppedByPlayer || opened >= total) {
 			finish();
+			return;
+		}
+		// No rows left but some were busy: let openNext schedule the retry or close the run.
+		if (rows.length == 0 && pendingRows.length > 0 && retryAt < 0) {
+			openNext();
 			return;
 		}
 		if (keysLeft() <= 0) {
@@ -184,11 +215,21 @@ class ChestRun {
 			}
 			var row:UInt = rows.shift();
 			// The game's own open returns without calling back while that row has a request in
-			// flight, which would leave the run waiting for its timeout: take the next row.
+			// flight, which would leave the run waiting for its timeout: keep it for one retry.
 			if (isPending(info, row)) {
-				skipped++;
-				Log.write("skip row " + row + ": a request is pending");
+				pendingRows.push(row);
+				Log.write("busy row " + row);
 				continue;
+			}
+			// The player or another mod may have opened it while this run was going.
+			if (!rowExists(info, row)) {
+				Log.write("row gone " + row);
+				continue;
+			}
+			if (!fullInventory && !info.hasRoomToOpenChest(gmId)) {
+				failed = "STORAGE";
+				finish();
+				return;
 			}
 			busy = true;
 			waitingSince = Timer.stamp();
@@ -203,8 +244,22 @@ class ChestRun {
 			}
 			return;
 		}
-		if (opened == 0 && skipped > 0)
+		if (opened == 0 && pendingRows.length > 0) {
 			failed = "BUSY";
+			finish();
+			return;
+		}
+		if (!retried && pendingRows.length > 0 && opened < total && !stoppedByPlayer && failed == null) {
+			retried = true;
+			var retryRows = pendingRows;
+			pendingRows = [];
+			rows = retryRows;
+			retryAt = Timer.stamp() + RETRY_DELAY;
+			Log.write("retry rows " + rows.length);
+			return;
+		}
+		if (opened < total && failed == null)
+			failed = "PARTIAL";
 		finish();
 	}
 
@@ -214,6 +269,19 @@ class ChestRun {
 		} catch (error:Dynamic) {
 			return false;
 		}
+	}
+
+	/** Whether the account still holds that chest row. */
+	static function rowExists(info:DBInventoryInfo, row:UInt):Bool {
+		var chests = info.chests;
+		var i = 0;
+		while (i < chests.length) {
+			var chest = chests[i];
+			if (chest != null && chest.containsDatabaseId(row))
+				return true;
+			i++;
+		}
+		return false;
 	}
 
 	function buyKey():Void {
@@ -316,8 +384,14 @@ class ChestRun {
 			return;
 		finished = true;
 		busy = false;
+		retryAt = 0;
+		Log.flush();
 		if (onDone != null)
 			onDone();
+	}
+
+	public function spendableGold():Float {
+		return facade.dbAccountInfo.basicCurrency;
 	}
 
 	/** The key that opens this kind of chest, null when the account has none of its kind. */
@@ -349,5 +423,3 @@ class ChestRun {
 		return offer != null && offer.Price > 0 && offer.CurrencyType == GMOffer.BASIC_CURRENCY;
 	}
 }
-
-

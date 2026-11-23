@@ -7,8 +7,8 @@ import openfl.text.TextField;
 import openfl.text.TextFormatAlign;
 
 /**
- * The chest window, drawn in the game's browns and golds: the amount to open, the run's progress, and
- * the loot as a grid of the items' own icons. Its words come from `Strings`, in the player's language.
+ * The chest window, drawn in the game's browns and golds: the amount to open or abandon, the run's
+ * progress, and the loot as a grid of the items' own icons. Its words come from `Strings`.
  */
 class Panel {
 	static inline final W = 640.0;
@@ -33,13 +33,17 @@ class Panel {
 
 	public var onOpen:Null<Int->Void>;
 
+	public var onAbandon:Null<Int->Void>;
+
 	public var onGold:Null<Bool->Void>;
 
 	public var onClose:Null<Void->Void>;
 
 	public var onStop:Null<Void->Void>;
 
-	var settings:Settings;
+	public var onGame:Null<Void->Void>;
+
+	public var onLanguage:Null<Void->Void>;
 
 	var holder:Sprite;
 
@@ -71,9 +75,15 @@ class Panel {
 
 	var slider:Slider;
 
+	var minusBtn:Btn;
+
+	var plusBtn:Btn;
+
 	var cost:TextField;
 
 	var note:TextField;
+
+	var gameBtn:Btn;
 
 	var goldBtn:Btn;
 
@@ -134,6 +144,12 @@ class Panel {
 
 	var pPayGold:Bool = true;
 
+	var pAbandon:Bool = false;
+
+	var awaitConfirm:Bool = false;
+
+	var confirmSpend:Float = 0;
+
 	var bOpened:Int = 0;
 
 	var bTotal:Int = 0;
@@ -142,11 +158,15 @@ class Panel {
 
 	var bGold:Float = 0;
 
+	var bAbandon:Bool = false;
+
 	var lOpened:Int = 0;
 
 	var lMessage:String;
 
 	var lOk:Bool = true;
+
+	var lAbandon:Bool = false;
 
 	var scale:Float = 1;
 
@@ -156,8 +176,7 @@ class Panel {
 
 	var shown:Bool = false;
 
-	public function new(overlay:Sprite, width:Float, height:Float, settings:Settings) {
-		this.settings = settings;
+	public function new(overlay:Sprite, width:Float, height:Float) {
 		viewWidth = width;
 		viewHeight = height;
 
@@ -196,7 +215,8 @@ class Panel {
 	}
 
 	/** The picker: the chest, what the account holds, and where the slider starts. */
-	public function ask(name:String, color:Int, available:Int, keys:Int, gold:Float, price:Float, max:Int, value:Int, payGold:Bool):Void {
+	public function ask(name:String, color:Int, available:Int, keys:Int, gold:Float, price:Float, max:Int, value:Int, payGold:Bool,
+			abandon:Bool):Void {
 		pName = name;
 		pColor = color;
 		pAvailable = available;
@@ -206,6 +226,9 @@ class Panel {
 		pMax = max;
 		pValue = value;
 		pPayGold = payGold;
+		pAbandon = abandon;
+		awaitConfirm = false;
+		confirmSpend = 0;
 		mode = 0;
 		show(pick);
 		slider.setMax(max);
@@ -221,12 +244,16 @@ class Panel {
 		pPrice = price;
 		pMax = max;
 		pPayGold = payGold;
+		awaitConfirm = false;
+		confirmSpend = 0;
 		if (mode == 0)
 			renderPick();
 	}
 
-	public function running(amount:Int):Void {
+	public function running(amount:Int, abandon:Bool):Void {
 		mode = 1;
+		bAbandon = abandon;
+		awaitConfirm = false;
 		bOpened = 0;
 		bTotal = amount;
 		bKeys = pKeys;
@@ -244,9 +271,17 @@ class Panel {
 			renderBusy();
 	}
 
+	public function progressAbandon(done:Int, total:Int):Void {
+		bOpened = done;
+		bTotal = total;
+		if (mode == 1)
+			renderBusy();
+	}
+
 	/** The loot, as a grid of the items' icons; `message` is a `Strings` key, or null. */
 	public function result(opened:Int, loot:Array<Loot>, message:String, ok:Bool):Void {
 		mode = 2;
+		lAbandon = false;
 		lOpened = opened;
 		lMessage = message;
 		lOk = ok;
@@ -256,12 +291,47 @@ class Panel {
 		renderLoot();
 	}
 
-	/** Opens, as the button does. */
+	/** The chests the run abandoned; no loot grid, just the count and the reason when it stopped. */
+	public function abandoned(count:Int, message:String, ok:Bool):Void {
+		mode = 2;
+		lAbandon = true;
+		lOpened = count;
+		lMessage = message;
+		lOk = ok;
+		loot = [];
+		page = 0;
+		pages = 1;
+		show(lootView);
+		renderLoot();
+	}
+
+	/** Opens or abandons, as the button does; both destructive gold and abandon need a second press. */
 	public function confirm():Void {
 		if (!shown || !pick.visible || !openBtn.enabled)
 			return;
+		var wanted = slider.value;
+		if (pAbandon) {
+			if (!awaitConfirm) {
+				awaitConfirm = true;
+				renderCost();
+				return;
+			}
+			awaitConfirm = false;
+			if (onAbandon != null)
+				onAbandon(wanted);
+			return;
+		}
+		var fromKeys = wanted < pKeys ? wanted : pKeys;
+		var bought = wanted - fromKeys;
+		if (bought > 0 && !awaitConfirm) {
+			awaitConfirm = true;
+			confirmSpend = bought * pPrice;
+			renderCost();
+			return;
+		}
+		awaitConfirm = false;
 		if (onOpen != null)
-			onOpen(slider.value);
+			onOpen(wanted);
 	}
 
 	/** Takes the panel away; closing is the caller's business. */
@@ -270,9 +340,25 @@ class Panel {
 			return;
 		shown = false;
 		hideTip();
+		if (slider != null)
+			slider.dispose();
 		if (holder.parent != null)
 			holder.parent.removeChild(holder);
 		cells = [];
+	}
+
+	/** Redraws the whole window, for the language change: the texts are built from `Strings`. */
+	public function rebuild():Void {
+		if (!shown)
+			return;
+		hideTip();
+		cells = [];
+		if (slider != null)
+			slider.dispose();
+		if (window.parent != null)
+			window.parent.removeChild(window);
+		window = newWindow();
+		buildWindow();
 	}
 
 	function newWindow():Sprite {
@@ -291,16 +377,6 @@ class Panel {
 		renderMode();
 	}
 
-	/** Redraws the whole window, for the language button: the texts are built from `Strings`. */
-	function rebuild():Void {
-		hideTip();
-		cells = [];
-		if (window.parent != null)
-			window.parent.removeChild(window);
-		window = newWindow();
-		buildWindow();
-	}
-
 	function renderMode():Void {
 		if (mode == 1) {
 			show(busy);
@@ -315,30 +391,57 @@ class Panel {
 	}
 
 	function renderPick():Void {
-		Ui.set(title, Strings.t("pick_title"));
+		Ui.set(title, pAbandon ? Strings.t("abandon_title") : Strings.t("pick_title"));
 		Ui.set(chestName, pName == null ? "" : pName.toUpperCase());
 		chestName.textColor = Ui.readable(pColor);
-		Ui.set(info, Strings.t("chests") + " " + pAvailable + "        " + Strings.t("keys") + " " + pKeys + "        " + Strings.t("gold") + " "
-			+ Ui.number(pGold));
+		if (pAbandon) {
+			Ui.set(info, Strings.t("chests") + " " + pAvailable);
+			goldBtn.root.visible = false;
+			gameBtn.setText(Strings.t("one_by_one"));
+			Ui.set(note, Strings.t("abandon_note"));
+			note.textColor = Ui.RED;
+		} else {
+			Ui.set(info, Strings.t("chests") + " " + pAvailable + "        " + Strings.t("keys") + " " + pKeys + "        " + Strings.t("gold")
+				+ " " + Ui.number(pGold));
+			goldBtn.root.visible = true;
+			goldBtn.setText(pPayGold ? Strings.t("pay_yes") : Strings.t("pay_no"));
+			goldBtn.setEnabled(pPrice > 0 && pKeys < pAvailable);
+			gameBtn.setText(Strings.t("game_window"));
+			Ui.set(note, Strings.t("note"));
+			note.textColor = Ui.DIM;
+		}
 		Ui.set(caption, Strings.f("max", Std.string(pMax)));
 		Ui.set(minLabel, pMax > 0 ? "1" : "");
 		Ui.set(maxLabel, Std.string(pMax));
 		slider.setMax(pMax);
 		slider.setValue(pValue);
 		pValue = slider.value;
-		goldBtn.setText(pPayGold ? Strings.t("pay_yes") : Strings.t("pay_no"));
-		goldBtn.setEnabled(pPrice > 0 && pKeys < pAvailable);
 		openBtn.setEnabled(pMax > 0);
+		gameBtn.setEnabled(onGame != null);
 		renderCost();
 	}
 
 	function renderCost():Void {
 		var wanted = slider.value;
 		pValue = wanted;
+		if (pAbandon) {
+			var abandonText = wanted == 1 ? Strings.t("abandon_cost_one") : Strings.f("abandon_cost", Std.string(wanted));
+			Ui.set(cost, abandonText);
+			cost.textColor = Ui.RED;
+			if (awaitConfirm)
+				openBtn.setText(Strings.f("confirm_abandon", Std.string(wanted)));
+			else
+				openBtn.setText(wanted == 1 ? Strings.t("abandon_one") : Strings.f("abandon_many", Std.string(wanted)));
+			openBtn.setDanger(true);
+			renderStepButtons();
+			return;
+		}
+		openBtn.setDanger(false);
 		if (wanted < 1) {
 			Ui.set(cost, emptyReason());
 			cost.textColor = Ui.RED;
 			openBtn.setText(Strings.t("open"));
+			renderStepButtons();
 			return;
 		}
 		var fromKeys = wanted < pKeys ? wanted : pKeys;
@@ -351,7 +454,19 @@ class Panel {
 			text = Strings.f("cost_mixed", Std.string(fromKeys), Std.string(bought), Ui.number(spend));
 		Ui.set(cost, text);
 		cost.textColor = spend > pGold ? Ui.RED : Ui.TEXT;
-		openBtn.setText(wanted == 1 ? Strings.t("open_one") : Strings.f("open_many", Std.string(wanted)));
+		if (awaitConfirm)
+			openBtn.setText(Strings.f("confirm_gold", Ui.number(confirmSpend)));
+		else
+			openBtn.setText(wanted == 1 ? Strings.t("open_one") : Strings.f("open_many", Std.string(wanted)));
+		renderStepButtons();
+	}
+
+	function renderStepButtons():Void {
+		if (minusBtn == null)
+			return;
+		var value = slider.value;
+		minusBtn.setEnabled(pMax > 1 && value > 1);
+		plusBtn.setEnabled(pMax > 1 && value < pMax);
 	}
 
 	/** Why there is nothing to open: no keys of this chest, or the gold that would buy them. */
@@ -364,15 +479,29 @@ class Panel {
 	}
 
 	function renderBusy():Void {
-		Ui.set(title, Strings.t("busy_title"));
+		Ui.set(title, bAbandon ? Strings.t("abandon_busy_title") : Strings.t("busy_title"));
 		var current = bOpened + 1;
-		Ui.set(busyLabel, Strings.f("busy_chest", Std.string(current > bTotal ? bTotal : current), Std.string(bTotal)));
+		var chest = bAbandon ? Strings.f("abandon_busy_chest", Std.string(current > bTotal ? bTotal : current), Std.string(bTotal)) : Strings.f("busy_chest",
+			Std.string(current > bTotal ? bTotal : current), Std.string(bTotal));
+		Ui.set(busyLabel, chest);
 		Ui.set(busyCount, bOpened + " / " + bTotal);
-		Ui.set(busyInfo, Strings.f("busy_info", Std.string(bKeys), Ui.number(bGold)));
+		Ui.set(busyInfo, bAbandon ? Strings.t("abandon_busy_info") : Strings.f("busy_info", Std.string(bKeys), Ui.number(bGold)));
 		drawBar(bOpened, bTotal);
 	}
 
 	function renderLoot():Void {
+		if (lAbandon) {
+			Ui.set(title, Strings.t("abandoned_title"));
+			if (lMessage == null)
+				Ui.set(lootInfo, Strings.f("abandoned", Std.string(lOpened)));
+			else
+				Ui.set(lootInfo, Strings.f("abandoned_stopped", Strings.t(lMessage), Std.string(lOpened)));
+			lootInfo.textColor = lOk ? Ui.TEXT : Ui.RED;
+			pages = 1;
+			page = 0;
+			refreshPage();
+			return;
+		}
 		Ui.set(title, Strings.t("loot_title"));
 		if (lMessage == null)
 			Ui.set(lootInfo, Strings.f("loot_opened", Std.string(lOpened)));
@@ -448,12 +577,8 @@ class Panel {
 	}
 
 	function toggleLanguage():Void {
-		Strings.lang = Strings.lang == "es" ? "en" : "es";
-		if (settings != null) {
-			settings.language = Strings.lang;
-			settings.save();
-		}
-		rebuild();
+		if (onLanguage != null)
+			onLanguage();
 	}
 
 	function buildPages():Void {
@@ -487,23 +612,36 @@ class Panel {
 		pick.addChild(caption);
 
 		slider = new Slider(70, 170, 500);
-		slider.onChange = renderCost;
+		slider.onChange = function() {
+			awaitConfirm = false;
+			renderCost();
+		};
 		pick.addChild(slider.root);
 
+		minusBtn = new Btn("-", 32, 32, false, function() stepValue(-1));
+		minusBtn.root.x = 32;
+		minusBtn.root.y = 158;
+		pick.addChild(minusBtn.root);
+
+		plusBtn = new Btn("+", 32, 32, false, function() stepValue(1));
+		plusBtn.root.x = 576;
+		plusBtn.root.y = 158;
+		pick.addChild(plusBtn.root);
+
 		minLabel = Ui.text(12, Ui.DIM, 60, TextFormatAlign.LEFT);
-		minLabel.x = 64;
-		minLabel.y = 184;
+		minLabel.x = 72;
+		minLabel.y = 194;
 		Ui.set(minLabel, "1");
 		pick.addChild(minLabel);
 
 		maxLabel = Ui.text(12, Ui.DIM, 60, TextFormatAlign.RIGHT);
-		maxLabel.x = W - 64 - 60;
-		maxLabel.y = 184;
+		maxLabel.x = W - 72 - 60;
+		maxLabel.y = 194;
 		pick.addChild(maxLabel);
 
 		cost = Ui.text(14, Ui.TEXT, W - 80, TextFormatAlign.CENTER);
 		cost.x = 40;
-		cost.y = 212;
+		cost.y = 214;
 		pick.addChild(cost);
 
 		goldBtn = new Btn(Strings.t("pay_yes"), 360, 38, false, toggleGold);
@@ -518,13 +656,18 @@ class Panel {
 		Ui.set(note, Strings.t("note"));
 		pick.addChild(note);
 
+		gameBtn = new Btn(Strings.t("game_window"), 240, 34, false, requestGame);
+		gameBtn.root.x = (W - 240) / 2;
+		gameBtn.root.y = 340;
+		pick.addChild(gameBtn.root);
+
 		cancelBtn = new Btn(Strings.t("cancel"), 190, 48, false, requestClose);
-		cancelBtn.root.x = 150 - 95;
+		cancelBtn.root.x = 55;
 		cancelBtn.root.y = 396;
 		pick.addChild(cancelBtn.root);
 
 		openBtn = new Btn(Strings.t("open"), 230, 48, true, confirm);
-		openBtn.root.x = 500 - 115;
+		openBtn.root.x = 385;
 		openBtn.root.y = 396;
 		pick.addChild(openBtn.root);
 	}
@@ -778,12 +921,19 @@ class Panel {
 		lootView.visible = group == lootView;
 	}
 
+	function stepValue(delta:Int):Void {
+		awaitConfirm = false;
+		slider.setValue(slider.value + delta);
+	}
+
 	function toggleGold():Void {
+		awaitConfirm = false;
 		if (onGold != null)
 			onGold(!pPayGold);
 	}
 
 	function requestClose():Void {
+		awaitConfirm = false;
 		if (onClose != null)
 			onClose();
 	}
@@ -793,8 +943,12 @@ class Panel {
 			onStop();
 	}
 
+	function requestGame():Void {
+		if (onGame != null)
+			onGame();
+	}
+
 	static function swallow(event:MouseEvent):Void {
 		event.stopImmediatePropagation();
 	}
 }
-

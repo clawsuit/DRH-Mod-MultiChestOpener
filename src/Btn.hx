@@ -13,6 +13,9 @@ class Btn {
 
 	public var enabled:Bool = true;
 
+	/** A destructive action: red instead of gold. */
+	public var danger:Bool = false;
+
 	var action:Null<Void->Void>;
 
 	var width:Float;
@@ -70,8 +73,24 @@ class Btn {
 			return;
 		enabled = value;
 		root.buttonMode = value;
-		label.textColor = value ? (accent ? Ui.INK : Ui.TEXT) : Ui.DIM;
+		label.textColor = labelColor();
 		paint();
+	}
+
+	public function setDanger(value:Bool):Void {
+		if (danger == value)
+			return;
+		danger = value;
+		label.textColor = labelColor();
+		paint();
+	}
+
+	function labelColor():Int {
+		if (!enabled)
+			return Ui.DIM;
+		if (accent && !danger)
+			return Ui.INK;
+		return Ui.TEXT;
 	}
 
 	function paint():Void {
@@ -86,6 +105,8 @@ class Btn {
 	function fill():Int {
 		if (!enabled)
 			return 0x2A1C10;
+		if (danger)
+			return over ? 0xD9583A : 0xA83224;
 		if (accent)
 			return over ? 0xFFDC8C : 0xE8B23B;
 		return over ? 0x5A3A1A : Ui.PARCHMENT;
